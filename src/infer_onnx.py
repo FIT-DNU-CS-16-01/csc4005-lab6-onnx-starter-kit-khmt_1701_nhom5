@@ -1,48 +1,76 @@
-from __future__ import annotations
-
-import argparse
+import os
 import json
-from pathlib import Path
+import torch
+import torch.nn as nn
+import torchvision.models as models
 
-import numpy as np
-from PIL import Image
-from torchvision import transforms
+# =========================
+# Create output directory
+# =========================
+OUTPUT_DIR = "outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-from src.runtime import create_onnx_session, run_onnx
+# =========================
+# Load ViT model
+# =========================
+model = models.vit_b_16(weights=None)
 
+# IndoorCVPR có 67 class
+num_classes = 67
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run ONNXRuntime inference on one image.")
-    parser.add_argument("--onnx_path", type=str, required=True)
-    parser.add_argument("--image_path", type=str, required=True)
-    parser.add_argument("--img_size", type=int, default=224)
-    parser.add_argument("--class_to_idx", type=str, default=None)
-    return parser.parse_args()
+model.heads.head = nn.Linear(
+    model.heads.head.in_features,
+    num_classes
+)
 
+model.eval()
 
-def main() -> None:
-    args = parse_args()
-    transform = transforms.Compose(
-        [
-            transforms.Resize((args.img_size, args.img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-    image = Image.open(args.image_path).convert("RGB")
-    x = transform(image).unsqueeze(0).numpy().astype(np.float32)
+# =========================
+# Dummy input
+# =========================
+dummy_input = torch.randn(1, 3, 224, 224)
 
-    session = create_onnx_session(args.onnx_path)
-    logits = run_onnx(session, x)
-    pred = int(np.argmax(logits, axis=1)[0])
+# =========================
+# Export ONNX
+# =========================
+onnx_path = os.path.join(
+    OUTPUT_DIR,
+    "vit_indoorcvpr.onnx"
+)
 
-    idx_to_class = None
-    if args.class_to_idx:
-        class_to_idx = json.loads(Path(args.class_to_idx).read_text(encoding="utf-8"))
-        idx_to_class = {v: k for k, v in class_to_idx.items()}
+torch.onnx.export(
+    model,
+    dummy_input,
+    onnx_path,
+    export_params=True,
+    opset_version=17,
+    do_constant_folding=True,
+    input_names=["input"],
+    output_names=["output"],
+    dynamic_axes={
+        "input": {0: "batch_size"},
+        "output": {0: "batch_size"}
+    }
+)
 
-    print({"pred_idx": pred, "pred_class": idx_to_class.get(pred) if idx_to_class else None})
+print(f"ONNX model saved to: {onnx_path}")
 
+# =========================
+# Save report
+# =========================
+report = {
+    "model": "ViT_B_16",
+    "num_classes": num_classes,
+    "opset_version": 17,
+    "dynamic_batch": True
+}
 
-if __name__ == "__main__":
-    main()
+report_path = os.path.join(
+    OUTPUT_DIR,
+    "export_report.json"
+)
+
+with open(report_path, "w") as f:
+    json.dump(report, f, indent=4)
+
+print(f"Report saved to: {report_path}")
